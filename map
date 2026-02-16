@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Leaflet Map</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+
+  <style>
+    /* Make the map fill the iframe/page */
+    html, body { height:100%; margin:0; }
+    #leaflet-map { width:100%; height:100%; }
+
+    /* Remove Leaflet popup diamond */
+    .pill-popup .leaflet-popup-tip-container { display:none !important; }
+
+    /* Popup pill */
+    .pill-popup .leaflet-popup-content-wrapper {
+      background:#f1f1f1;
+      border-radius:999px;
+      padding:6px 14px;
+      box-shadow:0 10px 25px rgba(0,0,0,0.20);
+    }
+    .pill-popup .leaflet-popup-content {
+      margin:0;
+      font-size:14px;
+      font-weight:500;
+      color:#333;
+      white-space:nowrap;
+    }
+    .pill-popup .leaflet-popup-close-button {
+      font-size:18px;
+      right:10px;
+      top:6px;
+    }
+
+    /* Hide default cluster bubble visuals so only our HTML shows */
+    .marker-cluster,
+    .marker-cluster div {
+      background:transparent !important;
+      box-shadow:none !important;
+      border:none !important;
+    }
+
+    /* Cluster HTML container (size set inline via JS) */
+    .cluster-stack {
+      position:relative;
+      pointer-events:auto;
+    }
+
+    /* Each icon image inside the cluster */
+    .cluster-item {
+      position:absolute;
+      width:24px;
+      height:32px;
+      filter:drop-shadow(0 6px 10px rgba(0,0,0,0.18));
+    }
+
+    /* Fallback star if category has no icon */
+    .fallback-star {
+      font-size:18px;
+      line-height:18px;
+      color:#111;
+      text-shadow:0 1px 2px rgba(0,0,0,0.25);
+    }
+  </style>
+</head>
+
+<body>
+  <div id="leaflet-map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+
+  <script>
+    // =========================
+    // URLS
+    // =========================
+    const POINTS_CSV =
+      "https://docs.google.com/spreadsheets/d/e/2PACX-1vSzsoWwjXvUzULZeGoox-Gwu9C5aw36rxVKfPUk2BRLV7y7Df55Q6Eh9sHcLbGB9P-51DSmok50yfoC/pub?gid=0&single=true&output=csv";
+
+    const ICONS_CSV =
+      "https://docs.google.com/spreadsheets/d/e/2PACX-1vSzsoWwjXvUzULZeGoox-Gwu9C5aw36rxVKfPUk2BRLV7y7Df55Q6Eh9sHcLbGB9P-51DSmok50yfoC/pub?gid=290716697&single=true&output=csv";
+
+    // =========================
+    // MAP
+    // =========================
+    const map = L.map("leaflet-map", {
+      scrollWheelZoom:true
+    }).setView([39.5, -98.35], 4); // Lower 48 default view
+
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+      subdomains:"abcd",
+      maxZoom:20,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
+        'Map tiles by <a href="https://carto.com/">CARTO</a>'
+    }).addTo(map);
+
+    // If the iframe resizes, tell Leaflet to re-measure
+    window.addEventListener("resize", () => map.invalidateSize());
+    setTimeout(() => map.invalidateSize(), 200);
+
+    // =========================
+    // ICONS
+    // =========================
+    const ICON_W = 24; // keeps 225x300 ratio
+    const ICON_H = 32;
+
+    const iconCache = {};
+
+    function getIcon(url){
+      if(!url) return null;
+      const key = String(url).trim();
+      if(!key) return null;
+      if(iconCache[key]) return iconCache[key];
+
+      const icon = L.icon({
+        iconUrl:key,
+        iconSize:[ICON_W, ICON_H],
+        iconAnchor:[ICON_W/2, ICON_H],
+        popupAnchor:[0, -ICON_H]
+      });
+
+      iconCache[key]=icon;
+      return icon;
+    }
+
+    const fallbackIcon = L.divIcon({
+      className:"fallback-star",
+      html:"★",
+      iconSize:[18,18],
+      iconAnchor:[9,9],
+      popupAnchor:[0,-18]
+    });
+
+    function norm(v){
+      return String(v || "").trim().toLowerCase();
+    }
+
+    // =========================
+    // DECLUTTER ("CLUSTER") SETTINGS
+    // =========================
+    function clusterRadiusByZoom(zoom){
+      if(zoom <= 3) return 4;
+      if(zoom === 4) return 6;
+      if(zoom === 5) return 8;
+      if(zoom === 6) return 10;
+      if(zoom === 7) return 14;
+      if(zoom === 8) return 18;
+      if(zoom === 9) return 22;
+      return 26;
+    }
+
+    const MAX_COLLAPSED_CLUSTER = 7;
+
+    const clusterGroup = L.markerClusterGroup({
+      showCoverageOnHover:false,
+      spiderfyOnMaxZoom:true,
+      zoomToBoundsOnClick:true,
+      maxClusterRadius: clusterRadiusByZoom,
+
+      iconCreateFunction:function(cluster){
+        const children = cluster.getAllChildMarkers();
+        const total = children.length;
+
+        if (total > MAX_COLLAPSED_CLUSTER) {
+          const SIZE = 56;
+          return L.divIcon({
+            html: `<div class="cluster-stack" style="width:${SIZE}px;height:${SIZE}px;display:flex;align-items:center;justify-content:center;">
+                     <div style="background:rgba(0,0,0,0.70);color:#fff;font-weight:700;border-radius:999px;padding:6px 10px;">${total}</div>
+                   </div>`,
+            className: "marker-cluster",
+            iconSize: [SIZE, SIZE],
+            iconAnchor: [SIZE/2, SIZE/2]
+          });
+        }
+
+        const urls = children
+          .map(m => m.__iconUrl)
+          .filter(u => u && String(u).trim().length);
+
+        if(urls.length === 0){
+          return L.divIcon({
+            html: `<div class="cluster-stack" style="width:80px;height:80px;display:flex;align-items:center;justify-content:center;">
+                     <div style="background:rgba(0,0,0,0.70);color:#fff;font-weight:700;border-radius:999px;padding:6px 10px;">${total}</div>
+                   </div>`,
+            className:"marker-cluster",
+            iconSize:[80,80],
+            iconAnchor:[40,40]
+          });
+        }
+
+        const SIZE = 160;
+        const BASE_X = SIZE/2;
+        const BASE_Y = SIZE/2;
+
+        const n = urls.length;
+        let angles = [];
+
+        if (n <= 6) {
+          const spanByN = { 1:0, 2:90, 3:110, 4:130, 5:140, 6:150 };
+          const span = spanByN[n] ?? 140;
+          const start = -span / 2;
+          const step = (n === 1) ? 0 : (span / (n - 1));
+          for (let i = 0; i < n; i++) angles.push(start + (i * step));
+        } else {
+          const step = 360 / n;
+          for (let i = 0; i < n; i++) angles.push(i * step);
+        }
+
+        let html = `<div class="cluster-stack" style="width:${SIZE}px;height:${SIZE}px;">`;
+
+        for(let i=0;i<urls.length;i++){
+          const url = urls[i];
+          const rot = angles[i] || 0;
+          const left = BASE_X - (ICON_W/2);
+          const top  = BASE_Y - ICON_H;
+
+          html += `<img class="cluster-item" src="${url}" style="left:${left}px;top:${top}px;transform:rotate(${rot}deg);transform-origin:${ICON_W/2}px ${ICON_H}px;" />`;
+        }
+
+        html += `</div>`;
+
+        return L.divIcon({
+          html: html,
+          className:"marker-cluster",
+          iconSize:[SIZE,SIZE],
+          iconAnchor:[BASE_X, BASE_Y]
+        });
+      }
+    });
+
+    map.addLayer(clusterGroup);
+
+    // =========================
+    // LOAD ICON LOOKUP THEN POINTS
+    // =========================
+    Papa.parse(ICONS_CSV, {
+      download:true,
+      header:true,
+      skipEmptyLines:true,
+      complete:function(iconResults){
+        const iconLookup = {};
+
+        (iconResults.data || []).forEach(function(row){
+          const keys = Object.keys(row);
+          if(!keys.length) return;
+
+          const category = row[keys[0]];
+          const url = row[keys[1]];
+
+          const k = norm(category);
+          const u = String(url || "").trim();
+
+          if(k && u) iconLookup[k]=u;
+        });
+
+        Papa.parse(POINTS_CSV, {
+          download:true,
+          header:true,
+          skipEmptyLines:true,
+          complete:function(pointResults){
+            (pointResults.data || []).forEach(function(row){
+              const keys = Object.keys(row);
+              if(!keys.length) return;
+
+              const name = String(row[keys[0]] || "").trim();
+              const lat = parseFloat(row[keys[2]]);
+              const lng = parseFloat(row[keys[3]]);
+              const category = row[keys[4]];
+
+              if(!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+              const iconUrl = iconLookup[norm(category)] || "";
+              const icon = getIcon(iconUrl);
+
+              const marker = L.marker([lat,lng], icon ? {icon:icon} : {icon:fallbackIcon});
+              marker.__iconUrl = iconUrl;
+
+              if(name){
+                marker.bindPopup(name, { className:"pill-popup", offset:L.point(0,-10) });
+              }
+
+              clusterGroup.addLayer(marker);
+            });
+
+            map.setView([39.5, -98.35], 4);
+            setTimeout(() => map.invalidateSize(), 200);
+          }
+        });
+      }
+    });
+  </script>
+</body>
+</html>
