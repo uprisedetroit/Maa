@@ -74,11 +74,35 @@
       color:#111;
       text-shadow:0 1px 2px rgba(0,0,0,0.25);
     }
+
+    /* =========================
+       PULSE STYLES (no transform animation)
+       ========================= */
+    @keyframes maaPulseGlow {
+      0%, 100% {
+        filter:
+          drop-shadow(0 6px 10px rgba(0,0,0,0.18))
+          drop-shadow(0 0 0 rgba(172,147,118,0));
+      }
+      50% {
+        filter:
+          drop-shadow(0 6px 10px rgba(0,0,0,0.18))
+          drop-shadow(0 0 14px rgba(172,147,118,0.95));
+      }
+    }
+
+    .pulse-icon {
+      animation: maaPulseGlow 1.15s ease-in-out infinite;
+    }
+
+    /* Optional muting for non-selected icons when a category is active */
+    .muted-icon {
+      opacity: 0.35;
+    }
   </style>
 </head>
 
 <body>
-  <!-- IMPORTANT: no inline height here -->
   <div id="leaflet-map"></div>
 
   <!-- JS libs -->
@@ -95,6 +119,18 @@
 
     const ICONS_CSV =
       "https://docs.google.com/spreadsheets/d/e/2PACX-1vSzsoWwjXvUzULZeGoox-Gwu9C5aw36rxVKfPUk2BRLV7y7Df55Q6Eh9sHcLbGB9P-51DSmok50yfoC/pub?gid=290716697&single=true&output=csv";
+
+    // =========================
+    // HELPERS
+    // =========================
+    function norm(v){
+      return String(v || "").trim().toLowerCase();
+    }
+
+    // =========================
+    // ACTIVE CATEGORY (set by parent page)
+    // =========================
+    let ACTIVE_CATEGORY_KEY = null;
 
     // =========================
     // MAP
@@ -146,10 +182,6 @@
       popupAnchor:[0,-18]
     });
 
-    function norm(v){
-      return String(v || "").trim().toLowerCase();
-    }
-
     // =========================
     // DECLUTTER ("CLUSTER") SETTINGS
     // =========================
@@ -166,6 +198,44 @@
 
     const MAX_COLLAPSED_CLUSTER = 7;
 
+    // =========================
+    // CATEGORY HIGHLIGHTING
+    // =========================
+    function applyMarkerClasses() {
+      const hasActive = !!ACTIVE_CATEGORY_KEY;
+
+      clusterGroup.eachLayer((m) => {
+        if (!(m instanceof L.Marker)) return;
+        const el = m.getElement && m.getElement();
+        if (!el) return; // not rendered (likely clustered)
+
+        const isHit = hasActive && m.__categoryKey === ACTIVE_CATEGORY_KEY;
+
+        el.classList.toggle("pulse-icon", isHit);
+
+        // Optional muting:
+        el.classList.toggle("muted-icon", hasActive && !isHit);
+      });
+    }
+
+    function setActiveCategory(label) {
+      ACTIVE_CATEGORY_KEY = norm(label);
+
+      // Update visible markers right now
+      applyMarkerClasses();
+
+      // Force cluster HTML to rebuild so pulsing can appear in cluster icons too
+      if (clusterGroup.refreshClusters) clusterGroup.refreshClusters();
+
+      // Re-apply after cluster refresh/layout
+      setTimeout(applyMarkerClasses, 50);
+    }
+
+    map.on("zoomend moveend", () => setTimeout(applyMarkerClasses, 0));
+
+    // =========================
+    // CLUSTER GROUP
+    // =========================
     const clusterGroup = L.markerClusterGroup({
       showCoverageOnHover:false,
       spiderfyOnMaxZoom:true,
@@ -176,11 +246,18 @@
         const children = cluster.getAllChildMarkers();
         const total = children.length;
 
+        const hasActive = !!ACTIVE_CATEGORY_KEY;
+        const containsActive = hasActive && children.some(m => m.__categoryKey === ACTIVE_CATEGORY_KEY);
+
+        // Big clusters: collapse to count bubble
         if (total > MAX_COLLAPSED_CLUSTER) {
           const SIZE = 56;
           return L.divIcon({
             html: `<div class="cluster-stack" style="width:${SIZE}px;height:${SIZE}px;display:flex;align-items:center;justify-content:center;">
-                     <div style="background:rgba(0,0,0,0.70);color:#fff;font-weight:700;border-radius:999px;padding:6px 10px;">${total}</div>
+                     <div class="${containsActive ? "pulse-icon" : ""}"
+                          style="background:rgba(0,0,0,0.70);color:#fff;font-weight:700;border-radius:999px;padding:6px 10px;">
+                       ${total}
+                     </div>
                    </div>`,
             className: "marker-cluster",
             iconSize: [SIZE, SIZE],
@@ -188,14 +265,22 @@
           });
         }
 
-        const urls = children
-          .map(m => m.__iconUrl)
-          .filter(u => u && String(u).trim().length);
+        // Build icon items for this cluster
+        const items = children
+          .map(m => ({
+            url: m.__iconUrl,
+            active: hasActive && m.__categoryKey === ACTIVE_CATEGORY_KEY
+          }))
+          .filter(x => x.url && String(x.url).trim().length);
 
-        if(urls.length === 0){
+        // If no icons, show bubble
+        if(items.length === 0){
           return L.divIcon({
             html: `<div class="cluster-stack" style="width:80px;height:80px;display:flex;align-items:center;justify-content:center;">
-                     <div style="background:rgba(0,0,0,0.70);color:#fff;font-weight:700;border-radius:999px;padding:6px 10px;">${total}</div>
+                     <div class="${containsActive ? "pulse-icon" : ""}"
+                          style="background:rgba(0,0,0,0.70);color:#fff;font-weight:700;border-radius:999px;padding:6px 10px;">
+                       ${total}
+                     </div>
                    </div>`,
             className:"marker-cluster",
             iconSize:[80,80],
@@ -207,7 +292,7 @@
         const BASE_X = SIZE/2;
         const BASE_Y = SIZE/2;
 
-        const n = urls.length;
+        const n = items.length;
         let angles = [];
 
         if (n <= 6) {
@@ -223,14 +308,18 @@
 
         let html = `<div class="cluster-stack" style="width:${SIZE}px;height:${SIZE}px;">`;
 
-        for(let i=0;i<urls.length;i++){
-          const url = urls[i];
+        for(let i=0;i<items.length;i++){
+          const url = items[i].url;
+          const isHot = items[i].active;
           const rot = angles[i] || 0;
 
           const left = BASE_X - (ICON_W/2);
           const top  = BASE_Y - ICON_H;
 
-          html += `<img class="cluster-item" src="${url}" style="left:${left}px;top:${top}px;transform:rotate(${rot}deg);transform-origin:${ICON_W/2}px ${ICON_H}px;" />`;
+          // NOTE: do NOT animate transform (Leaflet & our layout use it)
+          html += `<img class="cluster-item ${isHot ? "pulse-icon" : ""} ${hasActive && !isHot ? "muted-icon" : ""}"
+                       src="${url}"
+                       style="left:${left}px;top:${top}px;transform:rotate(${rot}deg);transform-origin:${ICON_W/2}px ${ICON_H}px;" />`;
         }
 
         html += `</div>`;
@@ -285,11 +374,13 @@
 
               if(!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
-              const iconUrl = iconLookup[norm(category)] || "";
+              const categoryKey = norm(category);
+              const iconUrl = iconLookup[categoryKey] || "";
               const icon = getIcon(iconUrl);
 
               const marker = L.marker([lat,lng], icon ? {icon:icon} : {icon:fallbackIcon});
               marker.__iconUrl = iconUrl;
+              marker.__categoryKey = categoryKey;
 
               if(name){
                 marker.bindPopup(name, {
@@ -303,8 +394,32 @@
 
             map.setView([39.5, -98.35], 4);
             setTimeout(() => map.invalidateSize(), 200);
+
+            // If a category was set before points loaded, make sure styling applies now
+            if (ACTIVE_CATEGORY_KEY) {
+              if (clusterGroup.refreshClusters) clusterGroup.refreshClusters();
+              setTimeout(applyMarkerClasses, 0);
+            }
           }
         });
+      }
+    });
+
+    // =========================
+    // POSTMESSAGE BRIDGE (Squarespace -> iframe)
+    // =========================
+    // Notify parent that the map is ready
+    try {
+      window.parent.postMessage({ type: "maa:ready" }, "*");
+    } catch (e) {}
+
+    window.addEventListener("message", (event) => {
+      // If you want to lock this down, replace "*" above and enforce:
+      // if (event.origin !== "https://YOUR-SQUARESPACE-DOMAIN.com") return;
+
+      const data = event.data || {};
+      if (data.type === "maa:setCategory") {
+        setActiveCategory(data.category || "");
       }
     });
   </script>
